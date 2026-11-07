@@ -24,7 +24,7 @@ import au.com.dius.pact.provider.junitsupport.loader.PactBrokerAuth;
  * way the consumer will.
  */
 @Provider("customer-service")
-@PactBroker(url = "${pactbroker.url}", authentication = @PactBrokerAuth(username = "${pactbroker.auth.username}", password = "${pactbroker.auth.password}"))
+@PactBroker(url = "${pactbroker.url}", authentication = @PactBrokerAuth(username = "${pactbroker.auth.username}", password = "${pactbroker.auth.password}", token = "${pactbroker.auth.token}"))
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
 class CustomerContractVerificationTest {
 

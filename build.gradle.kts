@@ -1,34 +1,182 @@
+// Standalone customer-service provider. Extracted from the contract-testing monorepo.
+// The version is derived from git: it keys the PactFlow provider version and every verification
+// result, so a hand-edited constant would overwrite results on each build.
+import java.security.MessageDigest
+
 plugins {
     java
-    alias(libs.plugins.spring.boot)
-    alias(libs.plugins.spring.dependency.management)
+    id("org.springframework.boot") version "3.5.16"
+    id("io.spring.dependency-management") version "1.1.7"
 }
 
-// pact-jvm's own POM pins Spring 5.3; spring-boot's BOM (Spring 6) is applied by the plugin and wins.
-dependencyManagement {
-    imports {
-        mavenBom(org.springframework.boot.gradle.plugin.SpringBootPlugin.BOM_COORDINATES)
+group = "com.example.customer"
+
+fun git(vararg args: String): String =
+    providers
+        .exec {
+            commandLine("git", *args)
+            isIgnoreExitValue = true
+        }.standardOutput
+        .asText
+        .get()
+        .trim()
+
+fun shortHash(text: String): String =
+    MessageDigest
+        .getInstance("SHA-1")
+        .digest(text.toByteArray())
+        .take(4)
+        .joinToString("") { "%02x".format(it) }
+
+version =
+    providers.environmentVariable("PACT_VERSION").orNull
+        ?: run {
+            val sha = git("describe", "--always", "--abbrev=12").ifEmpty { "0.0.0-unknown" }
+            if (git("status", "--porcelain").isEmpty()) {
+                sha
+            } else {
+                "$sha-dirty-${shortHash(git("diff", "HEAD"))}"
+            }
+        }
+
+// Recorded with the provider version. PACT_PROVIDER_BRANCH overrides it in CI, where HEAD is
+// detached; otherwise the checked-out branch is used.
+val providerBranch =
+    System.getenv("PACT_PROVIDER_BRANCH")
+        ?: git("rev-parse", "--abbrev-ref", "HEAD").takeIf { it.isNotEmpty() && it != "HEAD" }
+        ?: "main"
+
+java {
+    toolchain {
+        languageVersion = JavaLanguageVersion.of(21)
     }
+}
+
+repositories {
+    mavenCentral()
 }
 
 dependencies {
     implementation("org.springframework.boot:spring-boot-starter-web")
     implementation("org.springframework.boot:spring-boot-starter-validation")
 
-    testImplementation("org.springframework.boot:spring-boot-starter-test")
+    // Serves /v3/api-docs. The generated document is the provider contract published to PactFlow.
+    implementation("org.springdoc:springdoc-openapi-starter-webmvc-api:2.8.6")
 
-    // Provider side: verifies the HTTP pacts published by order-service.
-    testImplementation(libs.pact.provider.junit5spring)
+    testImplementation("org.springframework.boot:spring-boot-starter-test")
+    // Verifies the consumer pacts published by order-service against the running app.
+    testImplementation("au.com.dius.pact.provider:junit5spring:4.6.21")
 }
 
+// PactFlow authenticates with a bearer token; a local docker broker uses basic auth.
+val pactBrokerToken = System.getenv("PACT_BROKER_TOKEN")
+
 tasks.withType<Test>().configureEach {
-    // Pacts come from the broker, so this needs `docker compose -f docker-compose.broker.yml up -d`.
-    // Credentials come from the environment; the values below match docker-compose.broker.yml.
+    useJUnitPlatform()
+    systemProperty("pact.rootDir", layout.buildDirectory.dir("pacts").get().asFile.absolutePath)
     systemProperty("pactbroker.url", System.getenv("PACT_BROKER_BASE_URL") ?: "http://localhost:9292")
-    systemProperty("pactbroker.auth.username", System.getenv("PACT_BROKER_USERNAME") ?: "pact")
-    systemProperty("pactbroker.auth.password", System.getenv("PACT_BROKER_PASSWORD") ?: "pact")
-    // Verification results are published back to the broker, keyed by provider version + branch.
+    // pact-jvm uses basic auth whenever a username is set, so the token case has to blank it.
+    systemProperty(
+        "pactbroker.auth.username",
+        if (pactBrokerToken != null) "" else System.getenv("PACT_BROKER_USERNAME") ?: "pact",
+    )
+    systemProperty(
+        "pactbroker.auth.password",
+        if (pactBrokerToken != null) "" else System.getenv("PACT_BROKER_PASSWORD") ?: "pact",
+    )
+    systemProperty("pactbroker.auth.token", pactBrokerToken ?: "")
     systemProperty("pact.provider.version", project.version.toString())
-    systemProperty("pact.provider.branch", System.getenv("PACT_PROVIDER_BRANCH") ?: "main")
+    systemProperty("pact.provider.branch", providerBranch)
     systemProperty("pact.verifier.publishResults", "true")
+    testLogging {
+        events("passed", "skipped", "failed")
+    }
+}
+
+val openApiSpecFile = layout.buildDirectory.file("openapi/openapi.json")
+
+/**
+ * Generates the provider contract from the running application. Separate from `test` on purpose:
+ * publishing an OpenAPI document must not depend on a consumer's pacts being in the broker.
+ */
+val openApiSpecTest =
+    tasks.register<Test>("openApiSpecTest") {
+        description = "Generates the OpenAPI document that is published as this provider's contract."
+        group = "verification"
+        testClassesDirs = sourceSets["test"].output.classesDirs
+        classpath = sourceSets["test"].runtimeClasspath
+        filter { includeTestsMatching("*OpenApiSpecTest") }
+        systemProperty("openapi.output", openApiSpecFile.get().asFile.absolutePath)
+    }
+
+// PactFlow validates the self-verification object: `--verification-success` on its own sends only
+// {"success": true} and is rejected ("selfVerificationResults.content is missing"). Always attach
+// evidence. The content is staged inside the repo because the CLI reads it in the Docker container.
+val selfVerificationFile = layout.buildDirectory.file("openapi/self-verification.txt")
+
+val stageSelfVerification =
+    tasks.register("stageSelfVerification") {
+        description = "Copies PACT_VERIFICATION_RESULTS into the build, or writes a self-declared note."
+        val source = providers.environmentVariable("PACT_VERIFICATION_RESULTS")
+        val target = selfVerificationFile.get().asFile
+        // Captured as plain values: referencing project/rootDir inside doLast is a
+        // configuration-cache violation.
+        val repoRoot = rootDir
+        outputs.file(target)
+        outputs.upToDateWhen { false }
+        doLast {
+            val evidence = source.orNull
+            if (evidence == null) {
+                target.parentFile.mkdirs()
+                target.writeText(
+                    """
+                    Self-verification declared by the build: no API conformance tool was run
+                    against this OpenAPI document.
+
+                    Attach real evidence with PACT_VERIFICATION_RESULTS=<file> PACT_VERIFIER=<tool>
+                    PACT_VERIFICATION_EXIT_CODE=<exit code>.
+                    """.trimIndent(),
+                )
+            } else {
+                val given = File(evidence)
+                val evidenceFile = if (given.isAbsolute) given else File(repoRoot, evidence)
+                check(evidenceFile.isFile) { "PACT_VERIFICATION_RESULTS is not a file: $evidenceFile" }
+                target.writeBytes(evidenceFile.readBytes())
+            }
+        }
+    }
+
+tasks.register<Exec>("publishProviderContract") {
+    description = "Publishes the generated OpenAPI document to PactFlow (bi-directional contract testing)."
+    group = "verification"
+    dependsOn(openApiSpecTest, stageSelfVerification)
+
+    // The CLI runs in Docker so no Ruby toolchain is required. The broker URL and token are passed
+    // through from the environment, never baked into the build.
+    val specPath = openApiSpecFile.get().asFile.relativeTo(rootDir).path
+    val resultsPath = selfVerificationFile.get().asFile.relativeTo(rootDir).path
+    val verifier = System.getenv("PACT_VERIFIER") ?: "manual"
+    val resultsContentType = System.getenv("PACT_VERIFICATION_RESULTS_CONTENT_TYPE") ?: "text/plain"
+    val verificationExitCode = System.getenv("PACT_VERIFICATION_EXIT_CODE") ?: "0"
+    commandLine(
+        "docker", "run", "--rm",
+        "-v", "${rootDir.absolutePath}:/workspace",
+        "-w", "/workspace",
+        "-e", "PACT_BROKER_BASE_URL",
+        "-e", "PACT_BROKER_TOKEN",
+        "-e", "PACT_BROKER_USERNAME",
+        "-e", "PACT_BROKER_PASSWORD",
+        "pactfoundation/pact-cli",
+        "pactflow", "publish-provider-contract", specPath,
+        "--provider", "customer-service",
+        "--provider-app-version", project.version.toString(),
+        "--branch", providerBranch,
+        "--specification", "oas",
+        "--content-type", "application/json",
+        // --verification-exit-code and --verification-success are mutually exclusive.
+        "--verification-exit-code", verificationExitCode,
+        "--verification-results", resultsPath,
+        "--verification-results-content-type", resultsContentType,
+        "--verifier", verifier,
+    )
 }
