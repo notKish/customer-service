@@ -1,8 +1,6 @@
 // Standalone customer-service provider. Extracted from the contract-testing monorepo.
-// The version is derived from git: it keys the PactFlow provider version and every verification
-// result, so a hand-edited constant would overwrite results on each build.
-import java.security.MessageDigest
-
+// The version is the commit hash: it keys the PactFlow provider version and every verification
+// result, so it must identify exactly one tree.
 plugins {
     java
     id("org.springframework.boot") version "3.5.16"
@@ -21,23 +19,13 @@ fun git(vararg args: String): String =
         .get()
         .trim()
 
-fun shortHash(text: String): String =
-    MessageDigest
-        .getInstance("SHA-1")
-        .digest(text.toByteArray())
-        .take(4)
-        .joinToString("") { "%02x".format(it) }
+// The version is the commit hash, nothing else: a version must identify exactly one tree. A dirty
+// working tree is therefore not publishable (see the guard on publishProviderContract), rather than
+// publishing a hash-suffixed version that corresponds to no commit.
+val commitHash = git("rev-parse", "--short=12", "HEAD").ifEmpty { "0.0.0-unknown" }
+val treeIsClean = git("status", "--porcelain").isEmpty()
 
-version =
-    providers.environmentVariable("PACT_VERSION").orNull
-        ?: run {
-            val sha = git("describe", "--always", "--abbrev=12").ifEmpty { "0.0.0-unknown" }
-            if (git("status", "--porcelain").isEmpty()) {
-                sha
-            } else {
-                "$sha-dirty-${shortHash(git("diff", "HEAD"))}"
-            }
-        }
+version = providers.environmentVariable("PACT_VERSION").orNull ?: commitHash
 
 // Recorded with the provider version. PACT_PROVIDER_BRANCH overrides it in CI, where HEAD is
 // detached; otherwise the checked-out branch is used.
@@ -150,6 +138,17 @@ tasks.register<Exec>("publishProviderContract") {
     description = "Publishes the generated OpenAPI document to PactFlow (bi-directional contract testing)."
     group = "verification"
     dependsOn(openApiSpecTest, stageSelfVerification)
+
+    // Locals captured by value: referring to the script-level vals inside doFirst would capture the
+    // Gradle script object and break configuration-cache serialization.
+    val cleanForPublish = treeIsClean
+    val hashForPublish = commitHash
+    doFirst {
+        check(cleanForPublish) {
+            "Working tree is dirty: commit first so the provider version is a real commit hash " +
+                "($hashForPublish). Uncommitted changes are not publishable."
+        }
+    }
 
     // The CLI runs in Docker so no Ruby toolchain is required. The broker URL and token are passed
     // through from the environment, never baked into the build.

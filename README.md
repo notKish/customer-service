@@ -61,9 +61,10 @@ PACT_VERIFICATION_EXIT_CODE=$? \
 The file is staged to `build/openapi/self-verification.txt`, so it can live anywhere on the host; the
 CLI reads it inside the container.
 
-The version is `git describe --always --abbrev=12`, with `-dirty-<hash of the diff>` for uncommitted
-work, and `PACT_VERSION` overrides it. The branch is the checked-out branch (`PACT_PROVIDER_BRANCH`
-overrides it in CI). Every published version is therefore distinct.
+The version is the 12-character commit hash (`git rev-parse --short=12 HEAD`); `PACT_VERSION`
+overrides it. Publishing refuses to run on a dirty working tree — a version must identify exactly one
+commit — so commit before you publish. The branch is the checked-out branch (`PACT_PROVIDER_BRANCH`
+overrides it in CI).
 
 ## Verify the consumer pacts
 
