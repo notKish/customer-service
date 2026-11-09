@@ -25,12 +25,16 @@ fun git(vararg args: String): String =
 val commitHash = git("rev-parse", "--short=12", "HEAD").ifEmpty { "0.0.0-unknown" }
 val treeIsClean = git("status", "--porcelain").isEmpty()
 
-version = providers.environmentVariable("PACT_VERSION").orNull ?: commitHash
+// GitHub Actions turns a missing secret into an empty string, so blank has to mean "unset" here:
+// otherwise the empty value wins over the fallback and pact points at "".
+fun env(name: String): String? = System.getenv(name)?.takeIf { it.isNotBlank() }
+
+version = providers.environmentVariable("PACT_VERSION").orNull?.takeIf { it.isNotBlank() } ?: commitHash
 
 // Recorded with the provider version. PACT_PROVIDER_BRANCH overrides it in CI, where HEAD is
 // detached; otherwise the checked-out branch is used.
 val providerBranch =
-    System.getenv("PACT_PROVIDER_BRANCH")
+    env("PACT_PROVIDER_BRANCH")
         ?: git("rev-parse", "--abbrev-ref", "HEAD").takeIf { it.isNotEmpty() && it != "HEAD" }
         ?: "main"
 
@@ -57,20 +61,20 @@ dependencies {
 }
 
 // PactFlow authenticates with a bearer token; a local docker broker uses basic auth.
-val pactBrokerToken = System.getenv("PACT_BROKER_TOKEN")
+val pactBrokerToken = env("PACT_BROKER_TOKEN")
 
 tasks.withType<Test>().configureEach {
     useJUnitPlatform()
     systemProperty("pact.rootDir", layout.buildDirectory.dir("pacts").get().asFile.absolutePath)
-    systemProperty("pactbroker.url", System.getenv("PACT_BROKER_BASE_URL") ?: "http://localhost:9292")
+    systemProperty("pactbroker.url", env("PACT_BROKER_BASE_URL") ?: "http://localhost:9292")
     // pact-jvm uses basic auth whenever a username is set, so the token case has to blank it.
     systemProperty(
         "pactbroker.auth.username",
-        if (pactBrokerToken != null) "" else System.getenv("PACT_BROKER_USERNAME") ?: "pact",
+        if (pactBrokerToken != null) "" else env("PACT_BROKER_USERNAME") ?: "pact",
     )
     systemProperty(
         "pactbroker.auth.password",
-        if (pactBrokerToken != null) "" else System.getenv("PACT_BROKER_PASSWORD") ?: "pact",
+        if (pactBrokerToken != null) "" else env("PACT_BROKER_PASSWORD") ?: "pact",
     )
     systemProperty("pactbroker.auth.token", pactBrokerToken ?: "")
     systemProperty("pact.provider.version", project.version.toString())
@@ -113,7 +117,7 @@ val stageSelfVerification =
         outputs.file(target)
         outputs.upToDateWhen { false }
         doLast {
-            val evidence = source.orNull
+            val evidence = source.orNull?.takeIf { it.isNotBlank() }
             if (evidence == null) {
                 target.parentFile.mkdirs()
                 target.writeText(
@@ -154,9 +158,9 @@ tasks.register<Exec>("publishProviderContract") {
     // through from the environment, never baked into the build.
     val specPath = openApiSpecFile.get().asFile.relativeTo(rootDir).path
     val resultsPath = selfVerificationFile.get().asFile.relativeTo(rootDir).path
-    val verifier = System.getenv("PACT_VERIFIER") ?: "manual"
-    val resultsContentType = System.getenv("PACT_VERIFICATION_RESULTS_CONTENT_TYPE") ?: "text/plain"
-    val verificationExitCode = System.getenv("PACT_VERIFICATION_EXIT_CODE") ?: "0"
+    val verifier = env("PACT_VERIFIER") ?: "manual"
+    val resultsContentType = env("PACT_VERIFICATION_RESULTS_CONTENT_TYPE") ?: "text/plain"
+    val verificationExitCode = env("PACT_VERIFICATION_EXIT_CODE") ?: "0"
     commandLine(
         "docker", "run", "--rm",
         "-v", "${rootDir.absolutePath}:/workspace",
