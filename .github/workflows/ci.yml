@@ -54,10 +54,6 @@ jobs:
             exit 1
           fi
 
-      - name: Verify consumer pacts
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-        run: ./gradlew test
-
       - name: Publish the provider contract
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         run: ./gradlew publishProviderContract

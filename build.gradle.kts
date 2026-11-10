@@ -56,30 +56,10 @@ dependencies {
     implementation("org.springdoc:springdoc-openapi-starter-webmvc-api:2.8.6")
 
     testImplementation("org.springframework.boot:spring-boot-starter-test")
-    // Verifies the consumer pacts published by order-service against the running app.
-    testImplementation("au.com.dius.pact.provider:junit5spring:4.6.21")
 }
-
-// PactFlow authenticates with a bearer token; a local docker broker uses basic auth.
-val pactBrokerToken = env("PACT_BROKER_TOKEN")
 
 tasks.withType<Test>().configureEach {
     useJUnitPlatform()
-    systemProperty("pact.rootDir", layout.buildDirectory.dir("pacts").get().asFile.absolutePath)
-    systemProperty("pactbroker.url", env("PACT_BROKER_BASE_URL") ?: "http://localhost:9292")
-    // pact-jvm uses basic auth whenever a username is set, so the token case has to blank it.
-    systemProperty(
-        "pactbroker.auth.username",
-        if (pactBrokerToken != null) "" else env("PACT_BROKER_USERNAME") ?: "pact",
-    )
-    systemProperty(
-        "pactbroker.auth.password",
-        if (pactBrokerToken != null) "" else env("PACT_BROKER_PASSWORD") ?: "pact",
-    )
-    systemProperty("pactbroker.auth.token", pactBrokerToken ?: "")
-    systemProperty("pact.provider.version", project.version.toString())
-    systemProperty("pact.provider.branch", providerBranch)
-    systemProperty("pact.verifier.publishResults", "true")
     testLogging {
         events("passed", "skipped", "failed")
     }

@@ -5,7 +5,8 @@ Spring Boot provider extracted from the
 
 It publishes its own **provider contract** (an OpenAPI 3.0 document generated from the application)
 to PactFlow, where it is compared against the pacts published by `order-service` — bi-directional
-contract testing. The consumer-driven verifier is still here too, so the app is checked both ways.
+contract testing. PactFlow compares the two; this repo does not run a pact verifier, so the
+OpenAPI document is the only thing the provider side publishes.
 
 ```text
 order-service pact ─┐
@@ -21,7 +22,6 @@ src/main/java/com/example/customer/
 ├── CustomerServiceApplication.java
 └── OpenApiConfig.java             # document metadata (title, version, server)
 src/test/java/com/example/customer/
-├── CustomerContractVerificationTest.java   # verifies order-service's pacts against the app
 └── OpenApiSpecTest.java                    # writes the OpenAPI document used as provider contract
 ```
 
@@ -65,16 +65,6 @@ The version is the 12-character commit hash (`git rev-parse --short=12 HEAD`); `
 overrides it. Publishing refuses to run on a dirty working tree — a version must identify exactly one
 commit — so commit before you publish. The branch is the checked-out branch (`PACT_PROVIDER_BRANCH`
 overrides it in CI).
-
-## Verify the consumer pacts
-
-```bash
-export PACT_BROKER_BASE_URL=... PACT_BROKER_TOKEN=...
-./gradlew test
-```
-
-Fetches the pacts from the broker, calls this app over real HTTP, and publishes the verification
-results back against `pact.provider.version`.
 
 ## Local conformance check (optional)
 
